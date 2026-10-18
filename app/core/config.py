@@ -1,4 +1,4 @@
-﻿import os
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -14,7 +14,16 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ZENGENAI_ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 MAX_UPLOAD_BYTES = int(os.getenv("ZENGENAI_MAX_UPLOAD_MB", "20")) * 1024 * 1024
 UPLOAD_DIR = Path(os.getenv("ZENGENAI_UPLOAD_DIR", str(BASE_DIR / ".data" / "uploads"))).resolve()
-ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".csv", ".xlsx", ".xls"}
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".csv", ".xlsx"}
+CLAMAV_HOST = os.getenv("ZENGENAI_CLAMAV_HOST", "").strip()
+CLAMAV_PORT = int(os.getenv("ZENGENAI_CLAMAV_PORT", "3310"))
+REQUIRE_MALWARE_SCAN = os.getenv("ZENGENAI_REQUIRE_MALWARE_SCAN", "false").strip().lower() == "true"
+SMTP_HOST = os.getenv("ZENGENAI_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("ZENGENAI_SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("ZENGENAI_SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("ZENGENAI_SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.getenv("ZENGENAI_SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
+SMTP_USE_SSL = os.getenv("ZENGENAI_SMTP_USE_SSL", "false").strip().lower() == "true"
 
 
 def get_allowed_origins() -> list[str]:
