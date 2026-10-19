@@ -11,6 +11,7 @@ from app.models.finance import FinanceDocument, FinanceWorkspace
 from app.models.records import FinanceRecord
 from app.models.user import User
 from app.services.notifications import create_notification
+from app.services.entitlements import require_specialist_access
 from app.services.document_processing import extract_invoice_fields
 from app.services.upload_validation import UnsafeUpload, validate_upload
 from app.services.malware_scan import MalwareDetected, ScannerUnavailable, scan_upload
@@ -35,6 +36,7 @@ MIME_TYPES = {
 
 
 def get_workspace(db: Database, user: User) -> FinanceWorkspace:
+    require_specialist_access(db, user.id, "finance_analyst")
     workspace = db.scalar(select(FinanceWorkspace).where(FinanceWorkspace.owner_id == user.id))
     if workspace is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance workspace has not been set up.")
@@ -59,6 +61,7 @@ def read_workspace(user: CurrentUser, db: Database) -> FinanceWorkspace:
 
 @router.put("/workspace", response_model=FinanceWorkspaceResponse)
 def save_workspace(payload: FinanceWorkspaceInput, user: CurrentUser, db: Database) -> FinanceWorkspace:
+    require_specialist_access(db, user.id, "finance_analyst")
     workspace = db.scalar(select(FinanceWorkspace).where(FinanceWorkspace.owner_id == user.id))
     if workspace is None:
         workspace = FinanceWorkspace(owner_id=user.id, **payload.model_dump())

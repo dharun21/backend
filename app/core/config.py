@@ -24,6 +24,9 @@ SMTP_USERNAME = os.getenv("ZENGENAI_SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("ZENGENAI_SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.getenv("ZENGENAI_SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
 SMTP_USE_SSL = os.getenv("ZENGENAI_SMTP_USE_SSL", "false").strip().lower() == "true"
+FRONTEND_URL = os.getenv(
+    "ZENGENAI_FRONTEND_URL", "http://localhost:5173/Ai-workforce-workspace"
+).strip().rstrip("/")
 
 
 def get_allowed_origins() -> list[str]:
