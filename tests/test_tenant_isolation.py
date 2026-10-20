@@ -1,13 +1,6 @@
 import os
-import tempfile
 import unittest
 from pathlib import Path
-
-TEST_ROOT = Path(tempfile.mkdtemp(prefix="zengenai-api-tests-"))
-os.environ["ZENGENAI_DATABASE_URL"] = f"sqlite:///{(TEST_ROOT / 'test.db').as_posix()}"
-os.environ["ZENGENAI_JWT_SECRET"] = "unit-test-secret-that-is-longer-than-32-characters"
-os.environ["ZENGENAI_UPLOAD_DIR"] = str(TEST_ROOT / "uploads")
-os.environ["ZENGENAI_MAX_UPLOAD_MB"] = "1"
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +8,9 @@ from app.db import Base, SessionLocal, engine
 from app.main import app
 from app.models.finance import FinanceDocument, FinanceWorkspace
 from app.models.records import FinanceRecord
+from app.models.specialist_access import SpecialistAccess
+from app.models.user import User
+from tests.database_guard import require_test_database
 
 
 class TenantIsolationTests(unittest.TestCase):
@@ -29,6 +25,9 @@ class TenantIsolationTests(unittest.TestCase):
         engine.dispose()
 
     def setUp(self):
+        # Refuse to run (and therefore never drop tables) unless the engine
+        # points at a dedicated test database.
+        require_test_database(engine)
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         Path(os.environ["ZENGENAI_UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
@@ -44,6 +43,19 @@ class TenantIsolationTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 201, response.text)
             self.tokens[suffix] = response.json()["access_token"]
+            # Finance routes are gated behind the finance_analyst specialist grant.
+            with SessionLocal() as session:
+                user_id = session.query(User).filter_by(
+                    email=f"zengen-test-{suffix}@example.com"
+                ).one().id
+                session.add(
+                    SpecialistAccess(
+                        user_id=user_id,
+                        specialist_key="finance_analyst",
+                        enabled=True,
+                    )
+                )
+                session.commit()
             workspace_response = self.client.put(
                 "/api/v1/finance/workspace",
                 headers=self.headers(suffix),

@@ -13,7 +13,7 @@ class FinanceRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     workspace_id: Mapped[str] = mapped_column(ForeignKey("finance_workspaces.id", ondelete="CASCADE"), index=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("finance_documents.id", ondelete="CASCADE"), index=True)
-    record_type: Mapped[str] = mapped_column(String(32), default="invoice")
+    record_type: Mapped[str] = mapped_column(String(32), default="unclassified")
     counterparty: Mapped[str | None] = mapped_column(String(200), nullable=True)
     reference_number: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     issue_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -25,6 +25,9 @@ class FinanceRecord(Base):
     extraction_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     review_notes: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(32), default="needs_review")
+    payment_status: Mapped[str] = mapped_column(String(16), default="unpaid", nullable=False)
+    paid_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    reminder_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

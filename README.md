@@ -40,7 +40,40 @@ Uploads are size-limited, assigned server-generated storage names, checked again
 - `POST /api/v1/finance/documents/{id}/process` extracts review suggestions from text-based invoice PDFs
 - `GET /api/v1/finance/records`, `GET /api/v1/finance/records/{id}`, and `PATCH /api/v1/finance/records/{id}/confirm`
 
+## Local Finance Analyst chat
+
+Chat does not use an external AI provider or paid API key. It combines three local parts:
+
+1. A small Multinomial Naive Bayes intent classifier, trained on synthetic finance questions in app/services/finance_intent_model.py.
+2. Python finance tools that calculate amounts and due lists from the signed-in user's **confirmed** records. Those calculations remain the source of truth.
+3. An optional Ollama-hosted language model, running on this computer, which interprets open-ended questions and explains the verified answer and relevant workspace context in natural language. Its adapter only permits loopback addresses, so finance data is not sent to a hosted model API. If Ollama is unavailable, the existing finance tools answer instead.
+
+### Enable local conversational AI (Windows)
+
+Install Ollama for Windows, then in PowerShell run:
+
+```powershell
+ollama pull qwen2.5:1.5b
+ollama serve
+```
+
+Ollama may already run in the background after installation. Keep it running while using Finance Analyst. The backend defaults to http://127.0.0.1:11434 and model qwen2.5:1.5b; these can be changed with the ZENGENAI_LOCAL_LLM_* settings in .env. Restart FastAPI after changing those settings. The chat header reports whether a local language model answered or the deterministic finance tools were used.
+
+The Ollama model is an existing open model running locally; ZengenAI does not train that base language model from scratch. The finance intent classifier is our small task-specific model, but it is not a general language model and is not trained on customer records. Training a useful language model from scratch is not practical on an i3 PC. Chat history is stored per account in PostgreSQL, finance queries are workspace-scoped, and document IDs are checked against the signed-in user's workspace. Document text is treated as untrusted input. Unconfirmed extractions are suggestions, not verified totals.
+
+Ollama/model inference can be slow on low-end hardware. The default 1.5B model is a modest local option; response quality and speed depend on available memory and CPU. Production users need a server that runs the model, configured as a private service; do not point this local-only adapter at a public model endpoint.
+
+The training script prints accuracy on the same synthetic examples used for training. That number is only a smoke indicator, not an independent benchmark; add reviewed examples and evaluate on a separate held-out set before relying on it for broader production usage.
+
 Set `ZENGENAI_ALLOWED_ORIGINS` to a comma-separated list of trusted frontend origins when deploying. Set a strong unique JWT secret and a production database/upload configuration in the deployment environment. Do not commit credentials or API keys.
+
+## Deploying alongside the GitHub Pages frontend
+
+GitHub Pages only serves the frontend. Deploy this FastAPI app separately to a backend host and use a managed PostgreSQL database reachable from that host. Configure the backend host's start command as `uvicorn app.main:app --host 0.0.0.0 --port $PORT` (or the host's documented equivalent), with `backend` as the working directory. Set the environment variables from `.env.example` in the backend host's private environment settings; at minimum configure `ZENGENAI_DATABASE_URL`, a fresh `ZENGENAI_JWT_SECRET`, and `ZENGENAI_ALLOWED_ORIGINS` to the frontend origin, for example `https://dharun21.github.io` (origin only, no repository path). Set `ZENGENAI_FRONTEND_URL` to the full Pages URL including `/Ai-workforce-workspace` for password-reset links.
+
+Set the GitHub repository variable `VITE_API_BASE_URL` to the deployed backend URL ending in `/api/v1`, for example `https://api.example.com/api/v1`. The Pages workflow injects this value when it builds the frontend. Since Vite embeds it into public JavaScript, this URL is public configuration; never put secrets or database credentials in it. Push a new commit or rerun the Pages workflow after setting the variable.
+
+Do not use the development `.data/uploads` directory as production storage unless the backend host provides a persistent disk and backups. For multiple instances or ephemeral filesystems, configure shared object storage before enabling user uploads. Use HTTPS for the API and frontend, and verify `/health` is reachable after deployment.
 
 
 ## Email and in-app notifications

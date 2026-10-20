@@ -1,5 +1,6 @@
-﻿from datetime import date, datetime
+from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,6 +41,23 @@ class FinanceDocumentResponse(BaseModel):
     created_at: datetime
 
 
+class FinanceStatementResponse(BaseModel):
+    id: str
+    document_id: str
+    document_name: str
+    source_type: str
+    institution_name: str | None
+    account_holder: str | None
+    account_number: str | None
+    statement_date: date | None
+    period_start: date | None
+    period_end: date | None
+    currency: str | None
+    document_reference: str | None
+    transaction_count: int
+    created_at: datetime
+    status: str = "saved"
+
 class FinanceRecordResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,11 +75,17 @@ class FinanceRecordResponse(BaseModel):
     extraction_confidence: float
     review_notes: list[str]
     status: str
+    payment_status: Literal["unpaid", "paid"] = "unpaid"
+    paid_at: date | None = None
+    reminder_date: date | None = None
     created_at: datetime
     updated_at: datetime
 
 
 class FinanceRecordCorrection(BaseModel):
+    # Explicit classification is required at confirmation time so a supplier bill
+    # can never be silently confirmed (and counted) as customer income.
+    record_type: Literal["invoice", "expense"] | None = None
     counterparty: str | None = Field(default=None, max_length=200)
     reference_number: str | None = Field(default=None, max_length=120)
     issue_date: date | None = None
@@ -70,6 +94,14 @@ class FinanceRecordCorrection(BaseModel):
     subtotal: Decimal | None = Field(default=None, ge=0)
     tax_total: Decimal | None = Field(default=None, ge=0)
     total_amount: Decimal | None = Field(default=None, ge=0)
+
+
+class FinancePaymentUpdate(BaseModel):
+    payment_status: Literal["unpaid", "paid"]
+
+
+class FinanceReminderUpdate(BaseModel):
+    reminder_date: date | None
 
 
 class DocumentProcessResponse(BaseModel):
