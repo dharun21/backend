@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -31,6 +32,7 @@ class ChatConversationResponse(BaseModel):
 
     id: str
     title: str
+    domain: str = "finance_analyst"
     created_at: datetime
     updated_at: datetime
 
@@ -40,16 +42,19 @@ class ChatConversationListResponse(BaseModel):
 
     id: str
     title: str
+    domain: str = "finance_analyst"
     updated_at: datetime
 
 
 class CreateConversationRequest(BaseModel):
     title: str = Field(default="New conversation", min_length=1, max_length=200)
+    domain: Literal["general", "finance_analyst", "personal_assistant", "hr_executive", "sales_analyst"] = "general"
 
 
 class SendMessageRequest(BaseModel):
     conversation_id: str | None = None
     message: str = Field(min_length=1, max_length=4000)
+    domain: Literal["general", "finance_analyst", "personal_assistant", "hr_executive", "sales_analyst"] | None = None
     attach_document_id: str | None = None
 
 

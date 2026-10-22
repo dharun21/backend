@@ -14,9 +14,10 @@ from app.db import Base, engine
 async def lifespan(_: FastAPI):
     get_jwt_secret()
     Base.metadata.create_all(bind=engine)
-    # create_all creates new tables but does not add columns to an existing
-    # finance_records table. Keep this tiny, idempotent migration for local DBs.
+    # create_all creates new tables but does not add columns to existing tables.
+    # Keep these tiny, idempotent migrations for local databases.
     existing_columns = {column["name"] for column in inspect(engine).get_columns("finance_records")}
+    chat_columns = {column["name"] for column in inspect(engine).get_columns("chat_conversations")}
     with engine.begin() as connection:
         if "payment_status" not in existing_columns:
             connection.exec_driver_sql(
@@ -26,6 +27,8 @@ async def lifespan(_: FastAPI):
             connection.exec_driver_sql("ALTER TABLE finance_records ADD COLUMN paid_at DATE")
         if "reminder_date" not in existing_columns:
             connection.exec_driver_sql("ALTER TABLE finance_records ADD COLUMN reminder_date DATE")
+        if "domain" not in chat_columns:
+            connection.exec_driver_sql("ALTER TABLE chat_conversations ADD COLUMN domain VARCHAR(40) NOT NULL DEFAULT 'finance_analyst'")
     yield
 
 

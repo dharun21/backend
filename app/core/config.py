@@ -31,6 +31,7 @@ LOCAL_LLM_ENABLED = os.getenv("ZENGENAI_LOCAL_LLM_ENABLED", "true").strip().lowe
 LOCAL_LLM_URL = os.getenv("ZENGENAI_LOCAL_LLM_URL", "http://127.0.0.1:11434").strip().rstrip("/")
 LOCAL_LLM_MODEL = os.getenv("ZENGENAI_LOCAL_LLM_MODEL", "qwen2.5:1.5b").strip()
 LOCAL_LLM_TIMEOUT_SECONDS = float(os.getenv("ZENGENAI_LOCAL_LLM_TIMEOUT_SECONDS", "12"))
+GENERAL_LLM_TIMEOUT_SECONDS = float(os.getenv("ZENGENAI_GENERAL_LLM_TIMEOUT_SECONDS", "120"))
 
 
 def get_allowed_origins() -> list[str]:

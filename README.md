@@ -42,6 +42,28 @@ Uploads are size-limited, assigned server-generated storage names, checked again
 
 ## Local Finance Analyst chat
 
+General AI Chat uses the installed Ollama model for everyday questions, learning,
+writing, coding, personal topics, and recommendations. New conversations default
+to General. Existing Finance conversations also use the general assistant when
+the question is unrelated to workspace finance. Confirmed financial totals still
+come from the finance tools. General chat also looks up weather forecasts, currency
+reference rates, and named place facts directly from public sources. The app shows
+source links with those answers. The local model itself has no general live web search,
+so breaking news and other time-sensitive topics still need a dedicated search provider.
+
+Weather uses MET Norway's Locationforecast API (CC BY 4.0), currency rates use
+Frankfurter's latest dated reference rate, and encyclopedia summaries use Wikipedia.
+Thiruvarur district facts use the Tamil Nadu district government's page.
+MET Norway requires an identifying User-Agent and attribution; set
+`ZENGENAI_PUBLIC_USER_AGENT` to your app name and contact URL before deployment.
+The backend caches public responses and respects provider expiry headers. Provider
+outages return an explicit unavailable message instead of an invented live answer.
+
+Ollama must be running for general answers. If it is unavailable, chat returns a
+retryable error without saving an invented assistant reply. General requests allow
+up to 120 seconds (`ZENGENAI_GENERAL_LLM_TIMEOUT_SECONDS`); chat clients wait up to
+150 seconds. A cold model can take substantially longer than a warm one.
+
 Chat does not use an external AI provider or paid API key. It combines three local parts:
 
 1. A small Multinomial Naive Bayes intent classifier, trained on synthetic finance questions in app/services/finance_intent_model.py.

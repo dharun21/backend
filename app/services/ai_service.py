@@ -20,6 +20,9 @@ from app.models.user import User
 from app.services.finance_intent_model import finance_intent_model, tokenize
 from app.services.finance_intelligence import FinanceIntelligence
 from app.services.local_finance_model import generate_reply as generate_local_model_reply
+from app.services.local_general_model import generate_reply as generate_general_model_reply
+from app.services.local_general_model import LocalModelUnavailable, unavailable_message
+from app.services.live_information import LiveAnswer, answer_live_question
 
 
 class AIService:
@@ -34,8 +37,16 @@ class AIService:
         conversation_id: str | None,
         user_message: str,
         attach_document_id: str | None = None,
+        domain: str = "general",
     ) -> dict[str, Any]:
-        conversation = self._get_or_create_conversation(conversation_id)
+        if domain != "finance_analyst":
+            return self._generate_general_domain_reply(conversation_id, user_message, domain)
+        if attach_document_id is None:
+            live_answer = answer_live_question(user_message)
+            if live_answer:
+                return self._generate_general_domain_reply(conversation_id, user_message, domain, live_answer)
+
+        conversation = self._get_or_create_conversation(conversation_id, domain)
         previous_assistant = self.db.scalar(
             select(ChatMessage)
             .where(ChatMessage.conversation_id == conversation.id, ChatMessage.role == "assistant")
@@ -70,6 +81,16 @@ class AIService:
         document_reference = bool(message_words.intersection({"it", "that", "this", "doc", "docs", "document", "file", "attachment"}))
         previous_intent = previous_metadata.get("intent")
         intent, confidence = finance_intent_model.predict(user_message)
+        # The finance classifier was trained only on finance examples. Require
+        # topical evidence before treating an unrelated question as a finance intent.
+        finance_words = {"income", "expenses", "expense", "revenue", "profit", "profits", "profitability",
+                         "finances", "financial", "invoice", "invoices", "bill", "bills", "supplier",
+                         "suppliers", "spending", "cost", "costs", "receivables", "payments", "unpaid",
+                         "overdue", "earned", "earn", "money", "break", "records", "documents", "document"}
+        if intent not in {"greeting", "small_talk"} and not message_words.intersection(finance_words):
+            intent, confidence = "unknown", 0.0
+        if re.match(r"^(what (is|are)|define|explain)\b", user_message.strip(), re.IGNORECASE) and not message_words.intersection({"my", "our", "this", "that", "uploaded", "document", "invoice", "invoices", "bills"}):
+            intent, confidence = "unknown", 0.0
         document_terms = {"doc", "docs", "document", "documents", "file", "files", "pdf", "statement", "receipt", "attachment", "paper"}
         document_actions = {"explain", "summarize", "summary", "read", "show", "tell", "details", "detail", "contain", "contents", "say", "written"}
         invoice_bill_terms = {"invoice", "invoices", "bill", "bills"}
@@ -137,10 +158,10 @@ class AIService:
             attach_document_id,
             document_query=effective_question if asks_about_document and clarification_reply is None else None,
         )
-        follow_up = message_words.intersection({"and", "also", "then", "what", "how", "why", "it", "that", "those", "them"})
+        follow_up = message_words.intersection({"it", "that", "those", "them"}) and len(message_words) <= 6
         if asks_about_document:
             intent, confidence = "document_question", max(confidence, 0.92)
-        elif intent == "unknown" and follow_up and previous_intent not in {None, "greeting", "small_talk", "unknown"}:
+        elif intent == "unknown" and follow_up and previous_intent not in {None, "greeting", "small_talk", "unknown", "general"}:
             intent = previous_intent
             confidence = max(confidence, 0.5)
         if clarification_reply is not None:
@@ -149,11 +170,25 @@ class AIService:
             metadata["engine"] = "finance_clarification_rules"
             metadata["local_model_status"] = local_model_status
         else:
-            reply, message_type, metadata = self._answer(intent, confidence, effective_question, context)
             local_model_status = "not_used"
+            general_question = intent in {"unknown", "greeting", "small_talk"}
+            if general_question:
+                live_answer = answer_live_question(user_message)
+                if live_answer:
+                    reply, local_model_status = live_answer.reply, "not_needed"
+                else:
+                    reply, local_model_status = generate_general_model_reply("general", user_message, conversation_history)
+                    if not reply:
+                        raise LocalModelUnavailable(unavailable_message(local_model_status))
+                message_type = "text"
+                metadata = {"domain": domain, "engine": live_answer.engine if live_answer else "ollama_local_general_model", "intent": "general"}
+                if live_answer:
+                    metadata["sources"] = live_answer.sources
+            else:
+                reply, message_type, metadata = self._answer(intent, confidence, effective_question, context)
             # These intents already have trusted, complete answers from finance
             # calculations. Avoid waiting on Ollama for simple factual queries.
-            use_language_model = intent in {"profit_guidance", "document_question", "unknown"}
+            use_language_model = intent in {"profit_guidance", "document_question"}
             if use_language_model:
                 model_reply, local_model_status = generate_local_model_reply(
                     question=effective_question,
@@ -167,13 +202,13 @@ class AIService:
                     metadata["model"] = "local"
                 else:
                     metadata["engine"] = "local_finance_tools"
-            else:
+            elif not general_question:
                 local_model_status = "not_used_for_deterministic_answer"
                 metadata["engine"] = "local_finance_tools"
             metadata["local_model_status"] = local_model_status
 
         suggested_questions = (
-            [] if metadata.get("needs_more_info") else self._suggested_questions(intent, context)
+            [] if metadata.get("needs_more_info") or metadata.get("engine") == "ollama_local_general_model" else self._suggested_questions(intent, context)
         )
         metadata["suggested_questions"] = suggested_questions
         metadata["suggestion_version"] = 2
@@ -202,7 +237,61 @@ class AIService:
             "follow_up_questions": metadata.get("follow_up_questions", []),
         }
 
-    def _get_or_create_conversation(self, conversation_id: str | None) -> ChatConversation:
+    def _generate_general_domain_reply(
+        self, conversation_id: str | None, user_message: str, domain: str,
+        live_answer: LiveAnswer | None = None,
+    ) -> dict[str, Any]:
+        conversation = self._get_or_create_conversation(conversation_id, domain)
+        prior_count = self.db.scalar(
+            select(ChatMessage.id).where(ChatMessage.conversation_id == conversation.id).limit(1)
+        )
+        history_rows = list(self.db.scalars(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation.id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(10)
+        ).all())
+        history = [
+            {"role": item.role, "content": item.content[:3000]}
+            for item in reversed(history_rows)
+            if item.role in {"user", "assistant"}
+        ]
+        user_msg = ChatMessage(conversation_id=conversation.id, role="user", content=user_message)
+        self.db.add(user_msg)
+        live_answer = live_answer or answer_live_question(user_message)
+        if live_answer:
+            reply, model_status = live_answer.reply, "not_needed"
+        else:
+            reply, model_status = generate_general_model_reply(domain, user_message, history)
+            if not reply:
+                raise LocalModelUnavailable(unavailable_message(model_status))
+        metadata = {"domain": domain, "engine": live_answer.engine if live_answer else "ollama_local_general_model", "local_model_status": model_status}
+        if live_answer:
+            metadata["sources"] = live_answer.sources
+        assistant_msg = ChatMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=reply,
+            message_metadata=metadata,
+        )
+        self.db.add(assistant_msg)
+        conversation.updated_at = datetime.now(timezone.utc)
+        if not prior_count:
+            conversation.title = user_message.strip()[:190] or "New conversation"
+        self.db.commit()
+        self.db.refresh(assistant_msg)
+        return {
+            "conversation_id": conversation.id,
+            "message_id": assistant_msg.id,
+            "reply": reply,
+            "message_type": "text",
+            "metadata": metadata,
+            "suggested_questions": [],
+            "needs_more_info": False,
+            "follow_up_questions": [],
+        }
+
+    def _get_or_create_conversation(self, conversation_id: str | None, domain: str) -> ChatConversation:
         if conversation_id:
             conversation = self.db.scalar(
                 select(ChatConversation).where(
@@ -212,8 +301,10 @@ class AIService:
             )
             if not conversation:
                 raise LookupError("Conversation not found.")
+            if conversation.domain != domain:
+                raise LookupError("This conversation uses a different AI focus. Start a new conversation to switch focus.")
             return conversation
-        conversation = ChatConversation(user_id=self.user.id, title="New finance chat")
+        conversation = ChatConversation(user_id=self.user.id, title="New conversation", domain=domain)
         self.db.add(conversation)
         self.db.flush()
         return conversation

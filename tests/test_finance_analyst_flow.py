@@ -222,13 +222,14 @@ class FinanceAnalystFlowTests(unittest.TestCase):
         response = self.client.post(
             "/api/v1/chat/send",
             headers=self.headers,
-            json={"message": "What is my total income?"},
+            json={"message": "What is my total income?", "domain": "finance_analyst"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertTrue(body["conversation_id"])
         self.assertIn("reply", body)
-        self.assertGreater(len(body["suggested_questions"]), 0)
+        self.assertTrue(body["needs_more_info"])
+        self.assertEqual(body["suggested_questions"], [])  # No confirmed records yet.
 
         messages = self.client.get(
             f"/api/v1/chat/conversations/{body['conversation_id']}/messages",
@@ -251,22 +252,22 @@ class FinanceAnalystFlowTests(unittest.TestCase):
         response = self.client.post(
             "/api/v1/chat/send",
             headers=self.headers,
-            json={"message": "How much is my total income and profit?"},
+            json={"message": "How much is my total income and profit?", "domain": "finance_analyst"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertIn("5000", body["reply"])
-        self.assertIn("3000", body["reply"])
+        self.assertIn("5,000.00", body["reply"])
+        self.assertIn("3,000.00", body["reply"])
         labels = [f["label"] for f in body["metadata"]["supporting_figures"]]
-        self.assertIn("Total income", labels)
-        self.assertIn("Net profit", labels)
+        self.assertIn("Recorded income (all time)", labels)
+        self.assertIn("Income minus expenses (all time)", labels)
 
     def test_chat_bills_due_soon_branch_returns_a_reply(self):
         self._seed_confirmed_records()
         response = self.client.post(
             "/api/v1/chat/send",
             headers=self.headers,
-            json={"message": "Which bills are due soon?"},
+            json={"message": "Which bills are due soon?", "domain": "finance_analyst"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
