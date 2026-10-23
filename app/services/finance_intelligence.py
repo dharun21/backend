@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
 from sqlalchemy import select
 
 from app.models.finance import FinanceDocument, FinanceWorkspace
+from app.models.onboarding import BusinessProfile
 from app.models.records import FinanceRecord
+from app.services.finance_overview_focus import build_finance_focus
 
 
 class FinanceIntelligence:
@@ -55,14 +58,24 @@ class FinanceIntelligence:
             return self._empty_overview()
 
         records = self._confirmed_records(workspace.id)
+        profile = self.db.scalar(select(BusinessProfile).where(BusinessProfile.user_id == self.user.id))
+        business_type = workspace.business_type or (profile.business_type if profile else None)
         currency = workspace.currency or "USD"
+        # An amount in another currency cannot be added to the workspace total
+        # without a dated conversion rate. Keep those records in their own due
+        # lists, but leave them out of aggregate issue-date totals.
+        reporting_records = [
+            record for record in records
+            if not record.currency or record.currency.upper() == currency.upper()
+        ]
+        excluded_currencies = len(records) - len(reporting_records)
 
-        # Only explicitly classified records count. "invoice" means money owed to
-        # the business (customer invoice); "expense" means money the business owes
-        # (supplier bill). Unclassified records are excluded from both totals so a
+        # Only explicitly classified records count. "invoice" means a customer
+        # invoice issued by the business; "expense" means a supplier bill received
+        # by the business. Either can later be paid. Unclassified records are excluded so a
         # bill can never be silently counted as customer income.
-        income_records = [r for r in records if r.record_type == "invoice"]
-        expense_records = [r for r in records if r.record_type == "expense"]
+        income_records = [r for r in reporting_records if r.record_type == "invoice"]
+        expense_records = [r for r in reporting_records if r.record_type == "expense"]
 
         total_income = sum(self._to_float(r.total_amount) for r in income_records if r.total_amount)
         total_expenses = sum(self._to_float(r.total_amount) for r in expense_records if r.total_amount)
@@ -81,19 +94,27 @@ class FinanceIntelligence:
         for r in records:
             if not r.total_amount:
                 continue
+            balance = r.balance_due
+            if balance is None or balance <= 0:
+                continue
             item = {
                 "id": r.id,
                 "name": r.counterparty or "Unknown",
                 "reference": r.reference_number,
-                "amount": self._to_float(r.total_amount),
+                "amount": self._to_float(balance),
+                "total_amount": self._to_float(r.total_amount),
+                "amount_paid": self._to_float(r.amount_paid),
+                "balance_due": self._to_float(balance),
+                "payment_status": r.payment_status,
                 "currency": r.currency or currency,
                 "due_date": r.due_date.isoformat() if r.due_date else None,
                 "document_id": r.document_id,
             }
             due = r.due_date
-            if not due:
+            if not due and r.record_type == "invoice":
+                outstanding.append(item)
                 continue
-            if r.payment_status == "paid":
+            if not due:
                 continue
             if r.record_type == "expense":
                 # Money the business owes: past-due bills are overdue, near-due
@@ -126,8 +147,8 @@ class FinanceIntelligence:
             for r in recent
         ]
 
-        monthly_issued_amounts = self._monthly_issued_amounts(records)
-        monthly_revenue_and_costs = self._monthly_revenue_and_costs(records)
+        monthly_issued_amounts = self._monthly_issued_amounts(reporting_records)
+        monthly_revenue_and_costs = self._monthly_revenue_and_costs(reporting_records)
 
         needing_attention = list(
             self.db.scalars(
@@ -160,6 +181,9 @@ class FinanceIntelligence:
             data_completeness_note = (
                 f"Based on {total_records} confirmed record(s) only — figures may not represent your complete business."
             )
+        if excluded_currencies:
+            extra = f"{excluded_currencies} record(s) in other currencies were excluded from {currency} totals because no conversion rate was applied."
+            data_completeness_note = f"{data_completeness_note} {extra}" if data_completeness_note else extra
 
         return {
             "total_income": round(total_income, 2),
@@ -176,10 +200,15 @@ class FinanceIntelligence:
             "records_needing_attention": records_needing_attention,
             "basis_note": (
                 "Totals are sums of confirmed record amounts grouped by each record's issue date. "
-                "They are not cash received or paid, and the monthly difference is not a final business profit."
+                "Records in other currencies are excluded from aggregate totals. "
+                "A missing record currency is treated as the workspace currency. "
+                "Due-list amounts are remaining balances after recorded payments. Payments are user-entered cumulative amounts, not bank-reconciled cash. "
+                "Standalone payroll records are not included unless separately entered as confirmed expenses. "
+                "Issue-date totals are not cash received or paid, and the monthly difference is not a final business profit."
             ),
             "data_completeness_note": data_completeness_note,
             "total_records": total_records,
+            "focus": build_finance_focus(records, currency, business_type, as_of=now),
         }
 
     def _empty_overview(self) -> dict[str, Any]:
@@ -198,10 +227,15 @@ class FinanceIntelligence:
             "records_needing_attention": [],
             "basis_note": (
                 "Totals are sums of confirmed record amounts grouped by each record's issue date. "
-                "They are not cash received or paid, and the monthly difference is not a final business profit."
+                "Records in other currencies are excluded from aggregate totals. "
+                "A missing record currency is treated as the workspace currency. "
+                "Due-list amounts are remaining balances after recorded payments. Payments are user-entered cumulative amounts, not bank-reconciled cash. "
+                "Standalone payroll records are not included unless separately entered as confirmed expenses. "
+                "Issue-date totals are not cash received or paid, and the monthly difference is not a final business profit."
             ),
             "data_completeness_note": "No finance workspace found. Set up your finance workspace first.",
             "total_records": 0,
+            "focus": build_finance_focus([], "USD", None),
         }
 
     # ------------------------------------------------------------------ #
@@ -276,20 +310,30 @@ class FinanceIntelligence:
     # Break-even
     # ------------------------------------------------------------------ #
     def break_even(self, fixed_costs: float, price_per_unit: float, variable_cost_per_unit: float) -> dict[str, Any]:
-        contribution_margin = price_per_unit - variable_cost_per_unit
+        fixed = Decimal(str(fixed_costs))
+        price = Decimal(str(price_per_unit))
+        variable = Decimal(str(variable_cost_per_unit))
+        if fixed < 0 or price <= 0 or variable < 0:
+            return {
+                "break_even_units": None,
+                "break_even_revenue": None,
+                "contribution_margin": None,
+                "note": "Fixed and variable costs must be nonnegative, and price per unit must be positive.",
+            }
+        contribution_margin = price - variable
         if contribution_margin <= 0:
             return {
                 "break_even_units": None,
                 "break_even_revenue": None,
-                "contribution_margin": contribution_margin,
+                "contribution_margin": float(contribution_margin),
                 "note": "Variable cost per unit is equal to or higher than price — no break-even point.",
             }
-        units = fixed_costs / contribution_margin
+        units = (fixed / contribution_margin).to_integral_value(rounding=ROUND_CEILING)
         return {
-            "break_even_units": round(units, 2),
-            "break_even_revenue": round(units * price_per_unit, 2),
-            "contribution_margin": round(contribution_margin, 2),
-            "note": f"You need to sell approximately {round(units)} units to break even.",
+            "break_even_units": float(units),
+            "break_even_revenue": round(float(units * price), 2),
+            "contribution_margin": round(float(contribution_margin), 2),
+            "note": f"At a constant price and variable cost, sell at least {units} whole units to cover the supplied fixed costs for the same period.",
         }
 
     # ------------------------------------------------------------------ #

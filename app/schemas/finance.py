@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class FinanceWorkspaceInput(BaseModel):
     business_name: str = Field(min_length=1, max_length=200)
+    business_type: Literal["Retail", "Corporate"] | None = None
     industry: str | None = Field(default=None, max_length=160)
     country: str | None = Field(default=None, max_length=120)
     currency: str = Field(default="USD", min_length=3, max_length=12)
@@ -75,7 +76,9 @@ class FinanceRecordResponse(BaseModel):
     extraction_confidence: float
     review_notes: list[str]
     status: str
-    payment_status: Literal["unpaid", "paid"] = "unpaid"
+    payment_status: Literal["unpaid", "partial", "paid"] = "unpaid"
+    amount_paid: Decimal = Decimal("0.00")
+    balance_due: Decimal | None = None
     paid_at: date | None = None
     reminder_date: date | None = None
     created_at: datetime
@@ -97,7 +100,8 @@ class FinanceRecordCorrection(BaseModel):
 
 
 class FinancePaymentUpdate(BaseModel):
-    payment_status: Literal["unpaid", "paid"]
+    payment_status: Literal["unpaid", "paid"] | None = None
+    amount_paid: Decimal | None = Field(default=None, ge=0, decimal_places=2)
 
 
 class FinanceReminderUpdate(BaseModel):

@@ -1,4 +1,41 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class FocusBalance(BaseModel):
+    currency: str
+    amount: str
+    count: int
+
+
+class FocusAging(FocusBalance):
+    bucket: str
+    label: str
+
+
+class FocusCounterparty(BaseModel):
+    name: str
+    currency: str
+    amount: str
+    share_percent: str
+    record_count: int
+
+
+class FocusMissingData(BaseModel):
+    title: str
+    detail: str
+
+
+class FinanceFocusResponse(BaseModel):
+    business_type: Literal["retail", "corporate", "general"]
+    as_of: str
+    balances: dict[str, list[FocusBalance]]
+    aging: dict[str, list[FocusAging]]
+    concentration: dict[str, list[FocusCounterparty]]
+    missing_counterparty_counts: dict[str, int]
+    missing_data: list[FocusMissingData]
+    basis_note: str
 
 
 class FinanceOverviewResponse(BaseModel):
@@ -17,6 +54,7 @@ class FinanceOverviewResponse(BaseModel):
     records_needing_attention: list[dict]
     basis_note: str
     data_completeness_note: str | None = None
+    focus: FinanceFocusResponse
 
 
 class ScenarioComparison(BaseModel):

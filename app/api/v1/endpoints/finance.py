@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from app.api.dependencies import CurrentUser, Database
 from app.core.config import ALLOWED_EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_DIR
 from app.models.finance import FinanceDocument, FinanceStatement, FinanceStatementTransaction, FinanceWorkspace
+from app.models.onboarding import BusinessProfile
 from app.models.records import FinanceRecord
 from app.models.user import User
 from app.services.notifications import create_notification
@@ -68,12 +69,26 @@ def read_workspace(user: CurrentUser, db: Database) -> FinanceWorkspace:
 def save_workspace(payload: FinanceWorkspaceInput, user: CurrentUser, db: Database) -> FinanceWorkspace:
     require_specialist_access(db, user.id, "finance_analyst")
     workspace = db.scalar(select(FinanceWorkspace).where(FinanceWorkspace.owner_id == user.id))
+    values = payload.model_dump()
+    if values["business_type"] is None:
+        if workspace is not None:
+            values["business_type"] = workspace.business_type
+        else:
+            profile = db.scalar(select(BusinessProfile).where(BusinessProfile.user_id == user.id))
+            selected_type = (profile.business_type or "").strip().title() if profile else ""
+            values["business_type"] = selected_type if selected_type in {"Retail", "Corporate"} else None
     if workspace is None:
-        workspace = FinanceWorkspace(owner_id=user.id, **payload.model_dump())
+        workspace = FinanceWorkspace(owner_id=user.id, **values)
         db.add(workspace)
     else:
-        for key, value in payload.model_dump().items():
+        for key, value in values.items():
             setattr(workspace, key, value)
+    if values["business_type"] in {"Retail", "Corporate"}:
+        profile = db.scalar(select(BusinessProfile).where(BusinessProfile.user_id == user.id))
+        if profile is None:
+            profile = BusinessProfile(user_id=user.id)
+            db.add(profile)
+        profile.business_type = values["business_type"]
     db.commit()
     db.refresh(workspace)
     return workspace
@@ -469,9 +484,23 @@ def update_record_payment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance record not found.")
     if record.status != "confirmed" or record.record_type not in ("invoice", "expense"):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only confirmed invoices and bills can have a payment status.")
-    record.payment_status = payload.payment_status
-    record.paid_at = date.today() if payload.payment_status == "paid" else None
-    if payload.payment_status == "paid":
+    if (payload.payment_status is None) == (payload.amount_paid is None):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Provide either payment_status or cumulative amount_paid.")
+    if record.total_amount is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Confirm the invoice or bill total before recording payment.")
+    total = Decimal(str(record.total_amount))
+    amount_paid = (total if payload.payment_status == "paid" else Decimal("0.00")) if payload.payment_status else payload.amount_paid
+    assert amount_paid is not None
+    if amount_paid > total:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Recorded paid amount cannot exceed the invoice or bill total.")
+    previous_status = record.payment_status
+    record.amount_paid = amount_paid
+    record.payment_status = "paid" if amount_paid == total else "partial" if amount_paid > 0 else "unpaid"
+    if record.payment_status == "paid":
+        record.paid_at = (record.paid_at or date.today()) if previous_status == "paid" else date.today()
+    else:
+        record.paid_at = None
+    if record.payment_status == "paid":
         record.reminder_date = None
     db.commit()
     db.refresh(record)
@@ -519,8 +548,20 @@ def confirm_finance_record(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Classify this record before confirming it: a customer invoice (money owed to you) or a supplier bill/expense (money you owe).",
         )
+    recorded_paid = Decimal(str(record.amount_paid or 0))
+    revised_total = data.get("total_amount", record.total_amount)
+    if recorded_paid > 0 and revised_total is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Keep a total amount while recorded payments exist. Correct the payment first.")
+    if revised_total is not None and recorded_paid > Decimal(str(revised_total)):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="The corrected total cannot be less than the recorded paid amount. Correct the payment first.")
+    if recorded_paid > 0 and "currency" in data and (data["currency"] or "").upper() != (record.currency or workspace.currency or "").upper():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Correct the recorded payment before changing the currency.")
     for field, value in data.items():
         setattr(record, field, value)
+    if record.total_amount is not None and record.amount_paid:
+        fully_paid = Decimal(str(record.amount_paid)) == Decimal(str(record.total_amount))
+        record.payment_status = "paid" if fully_paid else "partial"
+        record.paid_at = (record.paid_at or date.today()) if fully_paid else None
     record.record_type = record_type
     record.status = "confirmed"
     record.review_notes = []

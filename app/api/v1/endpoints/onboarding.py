@@ -21,7 +21,7 @@ ONBOARDING_QUESTIONS = [
         "id": "business_type",
         "text": "What type of business do you run?",
         "type": "select",
-        "options": ["Retail", "Services", "E-commerce", "Manufacturing", "Consulting", "Something else"],
+        "options": ["Retail", "Corporate", "Services", "E-commerce", "Manufacturing", "Consulting", "Something else"],
         "allow_custom": True,
     },
     {
@@ -208,6 +208,7 @@ def update_profile(
     db: Database,
 ) -> BusinessProfileResponse:
     from app.models.onboarding import BusinessProfile
+    from app.models.finance import FinanceWorkspace
 
     require_specialist_access(db, user.id, "finance_analyst")
     profile = db.scalar(
@@ -220,6 +221,11 @@ def update_profile(
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(profile, field, value)
 
+    if "business_type" in payload.model_fields_set:
+        workspace = db.scalar(select(FinanceWorkspace).where(FinanceWorkspace.owner_id == user.id))
+        if workspace is not None:
+            workspace.business_type = profile.business_type if profile.business_type in {"Retail", "Corporate"} else None
+
     db.commit()
     db.refresh(profile)
     return BusinessProfileResponse.model_validate(profile)
@@ -227,6 +233,7 @@ def update_profile(
 
 def _save_profile(db: Database, user: User, answers: list[dict]) -> None:
     from app.models.onboarding import BusinessProfile
+    from app.models.finance import FinanceWorkspace
 
     answer_map = {a["question_id"]: a for a in answers}
     profile = db.scalar(
@@ -241,6 +248,9 @@ def _save_profile(db: Database, user: User, answers: list[dict]) -> None:
         return entry.get("custom_answer") or entry.get("answer")
 
     profile.business_type = get_answer("business_type")
+    workspace = db.scalar(select(FinanceWorkspace).where(FinanceWorkspace.owner_id == user.id))
+    if workspace is not None:
+        workspace.business_type = profile.business_type if profile.business_type in {"Retail", "Corporate"} else None
     profile.industry = get_answer("industry")
     profile.country = get_answer("country")
     profile.currency = get_answer("currency")

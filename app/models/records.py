@@ -1,5 +1,6 @@
 ﻿from datetime import date, datetime, timezone
 from uuid import uuid4
+from decimal import Decimal
 
 from sqlalchemy import Date, DateTime, Float, ForeignKey, JSON, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -26,6 +27,7 @@ class FinanceRecord(Base):
     review_notes: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(32), default="needs_review")
     payment_status: Mapped[str] = mapped_column(String(16), default="unpaid", nullable=False)
+    amount_paid: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0, nullable=False)
     paid_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     reminder_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -33,3 +35,9 @@ class FinanceRecord(Base):
 
     workspace: Mapped["FinanceWorkspace"] = relationship()
     document: Mapped["FinanceDocument"] = relationship()
+
+    @property
+    def balance_due(self) -> Decimal | None:
+        if self.total_amount is None:
+            return None
+        return max(Decimal("0.00"), Decimal(str(self.total_amount)) - Decimal(str(self.amount_paid or 0)))

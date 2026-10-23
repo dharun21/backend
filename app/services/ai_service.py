@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from pypdf import PdfReader
@@ -19,6 +20,11 @@ from app.models.records import FinanceRecord
 from app.models.user import User
 from app.services.finance_intent_model import finance_intent_model, tokenize
 from app.services.finance_intelligence import FinanceIntelligence
+from app.services.finance_advanced import answer_advanced_finance_workspace
+from app.services.finance_business_type import answer_business_type_finance
+from app.services.finance_learning import FinanceLearningAnswer, answer_finance_learning, answer_finance_workspace_limit
+from app.services.finance_people_costs import answer_finance_people_costs
+from app.services.finance_payroll_workspace import answer_finance_payroll_workspace
 from app.services.local_finance_model import generate_reply as generate_local_model_reply
 from app.services.local_general_model import generate_reply as generate_general_model_reply
 from app.services.local_general_model import LocalModelUnavailable, unavailable_message
@@ -86,7 +92,9 @@ class AIService:
         finance_words = {"income", "expenses", "expense", "revenue", "profit", "profits", "profitability",
                          "finances", "financial", "invoice", "invoices", "bill", "bills", "supplier",
                          "suppliers", "spending", "cost", "costs", "receivables", "payments", "unpaid",
-                         "overdue", "earned", "earn", "money", "break", "records", "documents", "document"}
+                         "overdue", "earned", "earn", "money", "break", "records", "documents", "document",
+                         "receivable", "payable", "payables", "cash", "flow", "working", "capital", "margin",
+                         "margins", "category", "categories", "refund", "credit"}
         if intent not in {"greeting", "small_talk"} and not message_words.intersection(finance_words):
             intent, confidence = "unknown", 0.0
         if re.match(r"^(what (is|are)|define|explain)\b", user_message.strip(), re.IGNORECASE) and not message_words.intersection({"my", "our", "this", "that", "uploaded", "document", "invoice", "invoices", "bills"}):
@@ -95,9 +103,15 @@ class AIService:
         document_actions = {"explain", "summarize", "summary", "read", "show", "tell", "details", "detail", "contain", "contents", "say", "written"}
         invoice_bill_terms = {"invoice", "invoices", "bill", "bills"}
         document_descriptions = {"explain", "about", "describe", "details", "detail", "say", "read", "summarize", "summary"}
+        generic_finance_concept = answer_finance_learning(user_message) if attach_document_id is None else None
+        if (generic_finance_concept and generic_finance_concept.intent == "finance_education"
+                and not message_words.intersection({"my", "our", "this", "that", "the", "uploaded", "attached", "latest"})
+                and intent == "document_question"):
+            intent, confidence = "unknown", 0.0
         specific_invoice_reference = any(any(character.isdigit() for character in word) for word in message_words)
         asks_for_invoice_document = bool(message_words.intersection(invoice_bill_terms)) and (
-            bool(message_words.intersection(document_descriptions))
+            (bool(message_words.intersection(document_descriptions))
+             and bool(message_words.intersection({"my", "our", "this", "that", "the", "uploaded", "attached", "latest"})))
             or specific_invoice_reference
             or (bool(message_words.intersection({"all", "list"})) and bool(message_words.intersection({"show", "list"})))
         )
@@ -106,6 +120,14 @@ class AIService:
         ) or (document_reference and bool(message_words.intersection(document_actions))) or (
             previous_intent == "document_question" and document_reference
         ) or asks_for_invoice_document
+        partial_workspace_query = bool(re.search(r"\bpartial(?:ly)?(?:\s+paid|\s+payment)?\b", user_message.lower())) and bool(
+            message_words.intersection({"my", "our", "which", "show", "list"})
+        ) and bool(message_words.intersection({"invoice", "invoices", "bill", "bills", "receivables", "payables"}))
+        balance_workspace_query = bool(re.search(r"\b(?:remaining|balance|still owe|left to pay|left to collect)\b", user_message.lower())) and bool(
+            message_words.intersection({"my", "our", "which", "show", "how"})
+        ) and bool(message_words.intersection({"invoice", "invoices", "bill", "bills", "receivables", "payables"}))
+        if (partial_workspace_query or balance_workspace_query) and not document_reference:
+            asks_about_document = False
         effective_question = user_message
         clarification_reply = None
         clarification_metadata = None
@@ -158,13 +180,56 @@ class AIService:
             attach_document_id,
             document_query=effective_question if asks_about_document and clarification_reply is None else None,
         )
+        advanced_answer = (
+            answer_advanced_finance_workspace(self.db, self.user.id, user_message, context["currency"])
+            if attach_document_id is None and not message_words.intersection({"document", "documents", "file", "files", "pdf", "attachment"})
+            else None
+        )
+        if advanced_answer is not None:
+            asks_about_document = False
+            clarification_reply = None
+        learning_answer = advanced_answer
+        if learning_answer is None and partial_workspace_query and not asks_about_document:
+            learning_answer = self._partial_payment_status(user_message, context["currency"])
+        if learning_answer is None and balance_workspace_query and not asks_about_document:
+            learning_answer = self._open_balance_status(user_message, context["currency"])
+        if learning_answer is None and attach_document_id is None and not asks_about_document and clarification_reply is None:
+            people_answer = answer_finance_people_costs(user_message, context["business_profile"])
+            explicit_people_inputs = bool(re.search(
+                r"\b(?:base salary|monthly salary|salary|hourly rate|bonus amount|unpaid leave days?|taxable pay|approved claim amount)\b\s*(?:is|=|:)?\s*(?:(?:USD|INR|EUR|GBP)\s*)?[$₹€£]?\s*\d",
+                user_message, re.I,
+            ))
+            learning_answer = (
+                self._cash_receipts_scenario(user_message, context["overview"], context["currency"])
+                or (people_answer if people_answer and (people_answer.intent == "finance_people_calculation" or explicit_people_inputs) else None)
+                or answer_finance_payroll_workspace(self.db, context["workspace_id"], user_message)
+                or people_answer
+                or answer_business_type_finance(user_message, context["business_profile"])
+                or generic_finance_concept
+                or answer_finance_workspace_limit(user_message)
+            )
         follow_up = message_words.intersection({"it", "that", "those", "them"}) and len(message_words) <= 6
         if asks_about_document:
             intent, confidence = "document_question", max(confidence, 0.92)
         elif intent == "unknown" and follow_up and previous_intent not in {None, "greeting", "small_talk", "unknown", "general"}:
             intent = previous_intent
             confidence = max(confidence, 0.5)
-        if clarification_reply is not None:
+        if learning_answer is not None:
+            intent = learning_answer.intent
+            reply, message_type = learning_answer.reply, "text"
+            metadata = {
+                "domain": domain,
+                "intent": intent,
+                "engine": "local_finance_tools" if intent in {"finance_scenario", "finance_aging", "finance_due_horizon", "finance_concentration", "finance_payment_status", "finance_payroll_records"} else "finance_calculator" if intent in {"finance_calculation", "finance_business_type_calculation", "finance_people_calculation"} else "finance_reference",
+                "supporting_figures": list(learning_answer.figures),
+                "supporting_documents": [],
+                "assumptions": list(learning_answer.assumptions),
+                "sources": list(learning_answer.sources),
+                "needs_more_info": learning_answer.needs_more_info,
+            }
+            local_model_status = "not_needed"
+            metadata["local_model_status"] = local_model_status
+        elif clarification_reply is not None:
             reply, message_type, metadata = clarification_reply, "question", clarification_metadata
             local_model_status = "not_used_for_clarification"
             metadata["engine"] = "finance_clarification_rules"
@@ -177,7 +242,7 @@ class AIService:
                 if live_answer:
                     reply, local_model_status = live_answer.reply, "not_needed"
                 else:
-                    reply, local_model_status = generate_general_model_reply("general", user_message, conversation_history)
+                    reply, local_model_status = generate_general_model_reply(domain, user_message, conversation_history)
                     if not reply:
                         raise LocalModelUnavailable(unavailable_message(local_model_status))
                 message_type = "text"
@@ -479,6 +544,9 @@ class AIService:
                         "subtotal": float(record.subtotal) if record.subtotal is not None else None,
                         "tax_total": float(record.tax_total) if record.tax_total is not None else None,
                         "total_amount": float(record.total_amount) if record.total_amount is not None else None,
+                        "amount_paid": float(record.amount_paid or 0),
+                        "balance_due": float(record.balance_due) if record.balance_due is not None else None,
+                        "payment_status": record.payment_status,
                         "review_notes": record.review_notes or [],
                     }
                     for record in records_by_document.get(document.id, [])
@@ -514,10 +582,14 @@ class AIService:
                     documents = [ranked[0][2]]
 
         return {
+            "workspace_id": workspace.id if workspace else None,
             "currency": (profile.currency if profile else None) or (workspace.currency if workspace else None) or overview.get("currency") or "",
             "business_name": workspace.business_name if workspace else None,
             "business_profile": {
+                "business_type": (workspace.business_type if workspace and workspace.business_type else None) or (profile.business_type if profile else None),
                 "industry": profile.industry if profile else (workspace.industry if workspace else None),
+                "country": profile.country if profile else None,
+                "revenue_model": profile.revenue_model if profile else None,
                 "what_they_sell": profile.what_they_sell if profile else None,
                 "main_goal": profile.main_goal if profile else None,
                 "biggest_challenge": profile.biggest_challenge if profile else None,
@@ -549,6 +621,117 @@ class AIService:
         except (TypeError, ValueError):
             amount = 0
         return f"{currency} {amount:,.2f}".strip()
+
+    @staticmethod
+    def _money_by_currency(items: list[dict[str, Any]], default_currency: str) -> str:
+        totals: dict[str, Decimal] = {}
+        for item in items:
+            code = str(item.get("currency") or default_currency).upper()
+            try:
+                amount = Decimal(str(item.get("amount") or 0))
+            except InvalidOperation:
+                continue
+            totals[code] = totals.get(code, Decimal(0)) + amount
+        return ", ".join(f"{code} {amount:,.2f}" for code, amount in sorted(totals.items())) or f"{default_currency} 0.00"
+
+    def _cash_receipts_scenario(
+        self, question: str, overview: dict[str, Any], currency: str
+    ) -> FinanceLearningAnswer | None:
+        lower = question.lower()
+        if not (re.search(r"\b(?:what if|scenario|if)\b", lower)
+                and re.search(r"\binvoices?\b", lower)
+                and re.search(r"\bpaid\b", lower)
+                and re.search(r"\bnext month\b", lower)):
+            return None
+        if not re.search(r"\b(?:all|every)\b", lower):
+            return FinanceLearningAnswer(
+                "Which confirmed invoices should I include? Give their references, or ask 'What if all unpaid invoices are paid next month?' "
+                "I need a defined set before calculating possible receipts.",
+                intent="finance_scenario", needs_more_info=True,
+            )
+        overdue = overview.get("overdue_invoices") or []
+        outstanding = overview.get("outstanding_invoices") or []
+        invoices = overdue if "overdue" in lower else overdue + outstanding
+        if not invoices:
+            return FinanceLearningAnswer(
+                "I found no confirmed unpaid invoices in the selected group to use for this scenario.",
+                intent="finance_scenario", needs_more_info=True,
+            )
+        totals = self._money_by_currency(invoices, currency)
+        references = ", ".join(str(item.get("reference") or item.get("id")) for item in invoices[:5])
+        if len(invoices) > 5:
+            references += f", and {len(invoices) - 5} more"
+        return FinanceLearningAnswer(
+            f"If all {len(invoices)} selected confirmed invoices are paid in full next month, potential customer receipts would be {totals}. "
+            f"Records used: {references}. This is a conditional cash-in scenario, not a forecast of bank balance or additional revenue. "
+            "This uses remaining balances after recorded partial payments. Disputes and payment timing are not tracked, so verify those before relying on it.",
+            intent="finance_scenario",
+            figures=tuple({
+                "label": str(item.get("reference") or item.get("id")),
+                "value": self._money(item.get("amount"), item.get("currency") or currency),
+                "source": f"confirmed invoice record {item.get('id')}",
+            } for item in invoices[:20]),
+            assumptions=("All selected invoices are paid in full next month; no fees, refunds, or disputes are deducted.",),
+        )
+
+    def _partial_payment_status(self, question: str, currency: str) -> FinanceLearningAnswer:
+        lower = question.lower()
+        record_type = "expense" if re.search(r"\b(?:bills?|payables?)\b", lower) else "invoice"
+        label = "supplier bills" if record_type == "expense" else "customer invoices"
+        records = list(self.db.scalars(
+            select(FinanceRecord)
+            .join(FinanceWorkspace, FinanceRecord.workspace_id == FinanceWorkspace.id)
+            .where(
+                FinanceWorkspace.owner_id == self.user.id,
+                FinanceRecord.status == "confirmed",
+                FinanceRecord.record_type == record_type,
+                FinanceRecord.payment_status == "partial",
+            )
+            .order_by(FinanceRecord.due_date.asc())
+        ).all())
+        if not records:
+            return FinanceLearningAnswer(f"I found no confirmed partially paid {label} in your workspace.", intent="finance_payment_status")
+        items = [{"amount": float(record.balance_due or 0), "currency": record.currency or currency} for record in records]
+        figures = tuple({
+            "label": record.reference_number or record.counterparty or record.id,
+            "value": self._money(record.balance_due, record.currency or currency),
+            "source": f"confirmed {record_type} record {record.id}; total {self._money(record.total_amount, record.currency or currency)}, recorded paid {self._money(record.amount_paid, record.currency or currency)}",
+        } for record in records[:20])
+        return FinanceLearningAnswer(
+            f"I found {len(records)} partially paid {label}. Their remaining balance by currency is {self._money_by_currency(items, currency)}. "
+            "See the figures below for each record. These are user-recorded cumulative payments, not bank-reconciled cash movements.",
+            intent="finance_payment_status", figures=figures,
+            assumptions=("Payments are cumulative amounts entered in the finance workspace; disputes are not tracked.",),
+        )
+
+    def _open_balance_status(self, question: str, currency: str) -> FinanceLearningAnswer:
+        record_type = "expense" if re.search(r"\b(?:bills?|payables?)\b", question.lower()) else "invoice"
+        label = "supplier bills" if record_type == "expense" else "customer invoices"
+        records = list(self.db.scalars(
+            select(FinanceRecord)
+            .join(FinanceWorkspace, FinanceRecord.workspace_id == FinanceWorkspace.id)
+            .where(
+                FinanceWorkspace.owner_id == self.user.id,
+                FinanceRecord.status == "confirmed",
+                FinanceRecord.record_type == record_type,
+            )
+            .order_by(FinanceRecord.due_date.asc())
+        ).all())
+        open_records = [record for record in records if record.balance_due is not None and record.balance_due > 0]
+        if not open_records:
+            return FinanceLearningAnswer(f"I found no confirmed {label} with a recorded remaining balance.", intent="finance_payment_status")
+        items = [{"amount": float(record.balance_due or 0), "currency": record.currency or currency} for record in open_records]
+        figures = tuple({
+            "label": record.reference_number or record.counterparty or record.id,
+            "value": self._money(record.balance_due, record.currency or currency),
+            "source": f"confirmed {record_type} record {record.id}; total {self._money(record.total_amount, record.currency or currency)}, recorded paid {self._money(record.amount_paid, record.currency or currency)}",
+        } for record in open_records[:20])
+        return FinanceLearningAnswer(
+            f"Across {len(open_records)} confirmed {label}, the remaining balance is {self._money_by_currency(items, currency)}. "
+            "This subtracts user-recorded cumulative payments from each record's total; it is not bank-reconciled cash.",
+            intent="finance_payment_status", figures=figures,
+            assumptions=("Records without a confirmed total are excluded. Disputes are not tracked.",),
+        )
 
     def _answer(
         self, intent: str, confidence: float, user_message: str, context: dict[str, Any]
@@ -601,8 +784,12 @@ class AIService:
             reply = (
                 f"For {period_label}, confirmed records show {self._money(income, currency)} in issued income, "
                 f"{self._money(expenses, currency)} in issued expenses, and a difference of {self._money(net, currency)}. "
-                "These are document issue-date totals, not cash received or verified business profit."
+                "These are document issue-date totals, not cash received or verified business profit. "
+                "Standalone payroll records are excluded unless also entered as confirmed expenses."
             )
+            completeness = overview.get("data_completeness_note") or ""
+            if "other currencies" in completeness:
+                reply += f" {completeness}"
             figures = [
                 {"label": f"{label} ({period_label})", "value": self._money(value, currency), "source": "confirmed finance records by issue date"}
                 for label, value in (("Recorded income", income), ("Recorded expenses", expenses), ("Income minus expenses", net))
@@ -613,12 +800,15 @@ class AIService:
         elif intent == "invoice_status":
             outstanding = overview.get("outstanding_invoices", [])
             overdue = overview.get("overdue_invoices", [])
-            total_overdue = sum(float(item.get("amount") or 0) for item in overdue)
-            reply = f"There are {len(outstanding)} confirmed customer invoice(s) outstanding and {len(overdue)} overdue. The overdue total is {self._money(total_overdue, currency)}."
+            total_overdue = self._money_by_currency(overdue, currency)
+            total_open = self._money_by_currency(outstanding + overdue, currency)
+            partial_count = sum(item.get("payment_status") == "partial" for item in outstanding + overdue)
+            reply = f"There are {len(outstanding)} confirmed customer invoice(s) not overdue or undated and {len(overdue)} overdue. The total remaining balance by currency is {total_open}; overdue balance is {total_overdue}. {partial_count} of these invoice(s) are partially paid."
             figures = [
                 {"label": "Outstanding invoices", "value": len(outstanding), "source": "confirmed records"},
                 {"label": "Overdue invoices", "value": len(overdue), "source": "confirmed records"},
-                {"label": "Overdue amount", "value": self._money(total_overdue, currency), "source": "confirmed records"},
+                {"label": "Total remaining balance by currency", "value": total_open, "source": "confirmed records after recorded payments"},
+                {"label": "Overdue remaining balance by currency", "value": total_overdue, "source": "confirmed records after recorded payments"},
             ]
             if overdue:
                 reply += " Overdue items: " + "; ".join(
@@ -630,11 +820,11 @@ class AIService:
         elif intent == "bills_due":
             bills = overview.get("bills_due_soon", [])
             overdue_bills = overview.get("overdue_bills", [])
-            due_total = sum(float(item.get("amount") or 0) for item in bills)
-            overdue_total = sum(float(item.get("amount") or 0) for item in overdue_bills)
+            due_total = self._money_by_currency(bills, currency)
+            overdue_total = self._money_by_currency(overdue_bills, currency)
             reply = (
-                f"I found {len(bills)} confirmed supplier bill(s) due within 7 days ({self._money(due_total, currency)}) "
-                f"and {len(overdue_bills)} overdue bill(s) ({self._money(overdue_total, currency)})."
+                f"I found {len(bills)} confirmed supplier bill(s) due within 7 days (remaining balance {due_total}) "
+                f"and {len(overdue_bills)} overdue bill(s) (remaining balance {overdue_total})."
             )
             figures = [
                 {"label": "Bills due within 7 days", "value": len(bills), "source": "confirmed records"},
@@ -657,28 +847,56 @@ class AIService:
                 reply = "Confirmed expenses by issue month: " + "; ".join(
                     f"{row['month']}: {self._money(row['costs'], currency)}" for row in months
                 ) + ". These are document issue-date totals, not payment dates."
+                completeness = overview.get("data_completeness_note") or ""
+                if "other currencies" in completeness:
+                    reply += f" {completeness}"
                 figures = [{"label": f"Expenses {row['month']}", "value": self._money(row["costs"], currency), "source": "confirmed record issue dates"} for row in months]
+                if len(months) >= 2:
+                    previous, current = months[-2:]
+                    previous_date = date.fromisoformat(f"{previous['month']}-01")
+                    current_date = date.fromisoformat(f"{current['month']}-01")
+                    consecutive = (
+                        current_date.year * 12 + current_date.month
+                        == previous_date.year * 12 + previous_date.month + 1
+                    )
+                    if consecutive:
+                        change = Decimal(str(current["costs"])) - Decimal(str(previous["costs"]))
+                        prior = Decimal(str(previous["costs"]))
+                        percentage = f" ({change / prior * 100:+.2f}%)" if prior else " (percentage undefined because the previous month was zero)"
+                        reply += f" Latest month-over-month change: {self._money(change, currency)}{percentage}. Check one-time bills, missing records, and category changes before treating a jump as unusual."
+                        figures.append({"label": f"Expense change {current['month']} vs {previous['month']}", "value": self._money(change, currency), "source": "confirmed record issue dates"})
+                    else:
+                        reply += " The latest recorded months are not consecutive, so I cannot label their difference month-over-month."
         elif intent == "profit_guidance":
             response_type = "business_guidance"
             profile = context["business_profile"]
             income = float(overview.get("total_income") or 0)
             expenses = float(overview.get("total_expenses") or 0)
             overdue = overview.get("overdue_invoices", [])
-            overdue_amount = sum(float(item.get("amount") or 0) for item in overdue)
+            overdue_amount = self._money_by_currency(overdue, currency)
             monthly = overview.get("monthly_revenue_and_costs", [])
             reply = "Here is a starting point based on records I can verify. "
             if overview.get("total_records"):
                 reply += f"Confirmed issued records show {self._money(income, currency)} income and {self._money(expenses, currency)} expenses (difference: {self._money(income - expenses, currency)}). "
                 if overdue:
-                    reply += f"You have {len(overdue)} overdue customer invoice(s) totaling {self._money(overdue_amount, currency)}; following up on these is a concrete collection action. "
+                    reply += f"You have {len(overdue)} overdue customer invoice(s) totaling {overdue_amount} by currency; following up on these is a concrete collection action. "
                 if monthly:
                     reply += f"The latest issue-month expense total is {self._money(monthly[-1].get('costs'), currency)}. Review its largest supplier costs for avoidable or negotiable spending. "
             else:
                 reply += "There are no confirmed finance records yet, so I can't identify which lever matters most. "
-            reply += "Compare selling prices with per-unit purchase and operating costs, then focus on the products with the strongest verified margin. I need unit prices, quantities, and variable costs before estimating a profit increase. Which area should we investigate first: pricing and margins, costs, or overdue collections?"
+            business_type = str(profile.get("business_type") or "").strip().lower()
+            if business_type == "retail":
+                reply += "For retail, compare product selling prices with verified cost of goods sold, then review POS settlements, returns, and stock movement when those records are available. I need SKU sales, inventory costs, and operating costs before estimating product margins. Which area should we investigate first: pricing and margins, stock and returns, costs, or overdue collections?"
+            elif business_type == "corporate":
+                reply += "For a corporate review, compare collections and supplier obligations first. Department budgets, contracts, approvals, and entity ledgers are needed before estimating group profit or a budget variance. Which area should we investigate first: collections, supplier costs, budgets, or contracts?"
+            else:
+                reply += "Compare selling prices with per-unit purchase and operating costs, then focus on the products with the strongest verified margin. I need unit prices, quantities, and variable costs before estimating a profit increase. Which area should we investigate first: pricing and margins, costs, or overdue collections?"
             if profile.get("biggest_challenge"):
                 reply += f" Your setup lists this challenge: {profile['biggest_challenge']}."
-            follow_up = [{"id": "profit-area", "question": "Which profit lever do you want to review first?", "suggested_answers": ["Pricing and margins", "Reduce operating costs", "Collect overdue invoices", "Something else"], "allow_custom": True}]
+            areas = (["Pricing and margins", "Stock and returns", "Reduce costs", "Collect overdue invoices"] if business_type == "retail" else
+                     ["Collect overdue invoices", "Supplier costs", "Budgets", "Contracts"] if business_type == "corporate" else
+                     ["Pricing and margins", "Reduce operating costs", "Collect overdue invoices", "Something else"])
+            follow_up = [{"id": "profit-area", "question": "Which area do you want to review first?", "suggested_answers": areas, "allow_custom": True}]
             needs_more = True
             assumptions.append("No estimated savings or profit increase is claimed without supporting business data.")
         elif intent == "break_even":

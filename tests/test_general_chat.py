@@ -24,6 +24,8 @@ class GeneralChatTests(unittest.TestCase):
             db.commit()
         app.dependency_overrides[get_current_user] = lambda: self.user
         self.client = TestClient(app)
+        # Keep these routing tests independent from live public-source lookups.
+        patch("app.services.ai_service.answer_live_question", return_value=None).start()
         self.general = patch("app.services.ai_service.generate_general_model_reply", return_value=("A useful general answer.", "available")).start()
         self.finance = patch("app.services.ai_service.generate_local_model_reply", return_value=(None, "disabled")).start()
 

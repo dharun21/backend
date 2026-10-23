@@ -17,14 +17,29 @@ async def lifespan(_: FastAPI):
     # create_all creates new tables but does not add columns to existing tables.
     # Keep these tiny, idempotent migrations for local databases.
     existing_columns = {column["name"] for column in inspect(engine).get_columns("finance_records")}
+    workspace_columns = {column["name"] for column in inspect(engine).get_columns("finance_workspaces")}
     chat_columns = {column["name"] for column in inspect(engine).get_columns("chat_conversations")}
     with engine.begin() as connection:
+        if "business_type" not in workspace_columns:
+            connection.exec_driver_sql("ALTER TABLE finance_workspaces ADD COLUMN business_type VARCHAR(20)")
+        connection.exec_driver_sql(
+            "UPDATE finance_workspaces SET business_type = "
+            "(SELECT p.business_type FROM business_profiles p WHERE p.user_id = finance_workspaces.owner_id) "
+            "WHERE business_type IS NULL AND EXISTS "
+            "(SELECT 1 FROM business_profiles p WHERE p.user_id = finance_workspaces.owner_id "
+            "AND p.business_type IN ('Retail', 'Corporate'))"
+        )
         if "payment_status" not in existing_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE finance_records ADD COLUMN payment_status VARCHAR(16) NOT NULL DEFAULT 'unpaid'"
             )
         if "paid_at" not in existing_columns:
             connection.exec_driver_sql("ALTER TABLE finance_records ADD COLUMN paid_at DATE")
+        if "amount_paid" not in existing_columns:
+            connection.exec_driver_sql("ALTER TABLE finance_records ADD COLUMN amount_paid NUMERIC(14, 2) NOT NULL DEFAULT 0")
+            connection.exec_driver_sql(
+                "UPDATE finance_records SET amount_paid = total_amount WHERE payment_status = 'paid' AND total_amount IS NOT NULL"
+            )
         if "reminder_date" not in existing_columns:
             connection.exec_driver_sql("ALTER TABLE finance_records ADD COLUMN reminder_date DATE")
         if "domain" not in chat_columns:

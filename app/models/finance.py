@@ -13,6 +13,7 @@ class FinanceWorkspace(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
     business_name: Mapped[str] = mapped_column(String(200))
+    business_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     industry: Mapped[str | None] = mapped_column(String(160), nullable=True)
     country: Mapped[str | None] = mapped_column(String(120), nullable=True)
     currency: Mapped[str] = mapped_column(String(12), default="USD")

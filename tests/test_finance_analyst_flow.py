@@ -274,6 +274,75 @@ class FinanceAnalystFlowTests(unittest.TestCase):
         self.assertEqual(body["message_type"], "fact_lookup")
         self.assertIn("bill", body["reply"].lower())
 
+    def test_finance_education_and_explicit_calculation_use_reviewed_routes(self):
+        concept = self.client.post(
+            "/api/v1/chat/send", headers=self.headers,
+            json={"message": "What is the difference between cash received and revenue recorded?", "domain": "finance_analyst"},
+        )
+        self.assertEqual(concept.status_code, 200, concept.text)
+        self.assertEqual(concept.json()["metadata"]["engine"], "finance_reference")
+        self.assertTrue(concept.json()["metadata"]["sources"])
+
+        generic_invoice = self.client.post(
+            "/api/v1/chat/send", headers=self.headers,
+            json={"message": "Explain a sales invoice", "domain": "finance_analyst"},
+        )
+        self.assertEqual(generic_invoice.status_code, 200, generic_invoice.text)
+        self.assertEqual(generic_invoice.json()["metadata"]["engine"], "finance_reference")
+        self.assertIn("customer payment", generic_invoice.json()["reply"])
+
+        calculation = self.client.post(
+            "/api/v1/chat/send", headers=self.headers,
+            json={"message": "Calculate break even: fixed costs 1001, price per unit 10, variable cost per unit 6", "domain": "finance_analyst"},
+        )
+        self.assertEqual(calculation.status_code, 200, calculation.text)
+        self.assertEqual(calculation.json()["metadata"]["engine"], "finance_calculator")
+        self.assertIn("251 whole units", calculation.json()["reply"])
+
+    def test_cash_scenario_uses_confirmed_invoices_and_clarifies_ambiguous_group(self):
+        self._seed_confirmed_records()
+        scenario = self.client.post(
+            "/api/v1/chat/send", headers=self.headers,
+            json={"message": "What if all unpaid invoices are paid next month?", "domain": "finance_analyst"},
+        )
+        self.assertEqual(scenario.status_code, 200, scenario.text)
+        self.assertEqual(scenario.json()["metadata"]["engine"], "local_finance_tools")
+        self.assertIn("INR 5,000.00", scenario.json()["reply"])
+        self.assertIn("INV-1", scenario.json()["reply"])
+
+        ambiguous = self.client.post(
+            "/api/v1/chat/send", headers=self.headers,
+            json={"message": "What if these invoices are paid next month?", "domain": "finance_analyst"},
+        )
+        self.assertEqual(ambiguous.status_code, 200, ambiguous.text)
+        self.assertTrue(ambiguous.json()["needs_more_info"])
+
+    def test_mixed_currency_records_are_not_added_to_workspace_totals(self):
+        self._seed_confirmed_records()
+        with SessionLocal() as session:
+            workspace = session.query(FinanceWorkspace).filter_by(owner_id=self._user_id()).one()
+            document = session.query(FinanceDocument).filter_by(workspace_id=workspace.id).one()
+            session.add(FinanceRecord(
+                workspace_id=workspace.id, document_id=document.id,
+                record_type="invoice", reference_number="USD-1", currency="USD",
+                issue_date=date.today(), due_date=None, total_amount=100,
+                status="confirmed", payment_status="unpaid",
+            ))
+            session.commit()
+        overview = self.client.get("/api/v1/intelligence/overview", headers=self.headers)
+        self.assertEqual(overview.status_code, 200, overview.text)
+        self.assertEqual(overview.json()["total_income"], 5000.0)
+        self.assertEqual(len(overview.json()["outstanding_invoices"]), 2)
+        self.assertIn("other currencies", overview.json()["data_completeness_note"])
+
+        scenario = self.client.post(
+            "/api/v1/chat/send", headers=self.headers,
+            json={"message": "What if all unpaid invoices are paid next month?", "domain": "finance_analyst"},
+        )
+        self.assertEqual(scenario.status_code, 200, scenario.text)
+        self.assertIn("INR 5,000.00", scenario.json()["reply"])
+        self.assertIn("USD 100.00", scenario.json()["reply"])
+
     def test_chat_delete_conversation(self):
         created = self.client.post("/api/v1/chat/conversations", headers=self.headers, json={"title": "Temp"})
         self.assertEqual(created.status_code, 200, created.text)
